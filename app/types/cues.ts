@@ -24,6 +24,13 @@ export type AckEvent = {
   sentAt: string;
 };
 
+export type CancelEvent = {
+  cueId: string;
+  from: string;
+  to: TargetName;
+  sentAt: string;
+};
+
 export type ChatMessage = {
   id: string;
   room_name: string;
