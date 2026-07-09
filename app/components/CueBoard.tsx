@@ -3,24 +3,18 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient, getRoomName } from "@/app/lib/supabase";
-import type { AckEvent, ChatMessage, Contestant, CueEvent, Preset, UserName } from "@/app/types/cues";
+import type { AckEvent, ChatMessage, Contestant, CueEvent, Person, TargetName } from "@/app/types/cues";
 
-const USERS: UserName[] = ["Ian", "Spike"];
 const STORAGE_USER = "the-spike-user";
+const STORAGE_CHAT_TARGET = "the-spike-chat-target";
+const STORAGE_ATTENTION_TARGET = "the-spike-attention-target";
+const EVERYONE = "Everyone";
+const ATTENTION_TIMEOUT_MS = 30_000;
+const CHAT_WINDOW_HOURS = 4;
 
-const DEFAULT_PRESETS: Omit<Preset, "id">[] = [
-  { sender: "Spike", label: "Look up", sort_order: 10, active: true },
-  { sender: "Spike", label: "Wrap", sort_order: 20, active: true },
-  { sender: "Spike", label: "Stretch", sort_order: 30, active: true },
-  { sender: "Spike", label: "Time", sort_order: 40, active: true },
-  { sender: "Spike", label: "Check WhatsApp", sort_order: 50, active: true },
-  { sender: "Spike", label: "Problem", sort_order: 60, active: true },
-  { sender: "Ian", label: "Need you", sort_order: 10, active: true },
-  { sender: "Ian", label: "Look at me", sort_order: 20, active: true },
-  { sender: "Ian", label: "Check WhatsApp", sort_order: 30, active: true },
-  { sender: "Ian", label: "Next caller", sort_order: 40, active: true },
-  { sender: "Ian", label: "Hold", sort_order: 50, active: true },
-  { sender: "Ian", label: "Problem", sort_order: 60, active: true }
+const DEFAULT_PEOPLE = [
+  { name: "Ian", sort_order: 10 },
+  { name: "Spike", sort_order: 20 }
 ];
 
 const DEFAULT_CONTESTANTS = [1, 2, 3, 4].map((sortOrder) => ({
@@ -30,31 +24,28 @@ const DEFAULT_CONTESTANTS = [1, 2, 3, 4].map((sortOrder) => ({
   sort_order: sortOrder
 }));
 
-const CHAT_ATTENTION_GAP_MS = 90_000;
-const CHAT_FLASH_MS = 4_000;
-
-function otherUser(user: UserName): UserName {
-  return user === "Ian" ? "Spike" : "Ian";
-}
-
-function makePreset(row: Omit<Preset, "id">): Preset {
-  return { ...row, id: crypto.randomUUID() };
-}
-
-function sortedPresets(items: Preset[]) {
-  return [...items].sort((a, b) => a.sort_order - b.sort_order || a.label.localeCompare(b.label));
+function sortedPeople(items: Person[]) {
+  return [...items].filter((person) => person.active).sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
 }
 
 function finalScore(contestant: Contestant) {
   return Math.max(0, contestant.correct_count - contestant.wrong_count);
 }
 
-function userListWith(list: UserName[] = [], user: UserName) {
-  return Array.from(new Set([...list, user]));
+function nameListWith(list: string[] = [], name: string) {
+  return Array.from(new Set([...list, name]));
 }
 
-function userListWithout(list: UserName[] = [], user: UserName) {
-  return list.filter((name) => name !== user);
+function nameListWithout(list: string[] = [], name: string) {
+  return list.filter((item) => item !== name);
+}
+
+function isForPerson(target: TargetName, person: string) {
+  return target === EVERYONE || target === person;
+}
+
+function displayTime(value: string) {
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 export default function CueBoard({ initialAuthenticated }: { initialAuthenticated: boolean }) {
@@ -63,93 +54,96 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
   const [authenticated, setAuthenticated] = useState(initialAuthenticated);
   const [passcode, setPasscode] = useState("");
   const [authError, setAuthError] = useState("");
-  const [user, setUser] = useState<UserName | "">(() => {
+  const [user, setUser] = useState(() => {
     if (typeof window === "undefined") return "";
-    const savedUser = window.localStorage.getItem(STORAGE_USER);
-    return savedUser === "Ian" || savedUser === "Spike" ? savedUser : "";
+    return window.localStorage.getItem(STORAGE_USER) || "";
   });
-  const [presets, setPresets] = useState<Preset[]>(() => DEFAULT_PRESETS.map(makePreset));
+  const [people, setPeople] = useState<Person[]>([]);
+  const [newPerson, setNewPerson] = useState("");
+  const [chatTarget, setChatTarget] = useState<TargetName>(() => {
+    if (typeof window === "undefined") return EVERYONE;
+    return window.localStorage.getItem(STORAGE_CHAT_TARGET) || "Spike";
+  });
+  const [attentionTarget, setAttentionTarget] = useState<TargetName>(() => {
+    if (typeof window === "undefined") return EVERYONE;
+    return window.localStorage.getItem(STORAGE_ATTENTION_TARGET) || "Spike";
+  });
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [chatError, setChatError] = useState("");
-  const [chatFlashActive, setChatFlashActive] = useState(false);
-  const [chatFlashKey, setChatFlashKey] = useState(0);
+  const [activeCue, setActiveCue] = useState<CueEvent | null>(null);
+  const [pendingAttentionId, setPendingAttentionId] = useState<string | null>(null);
   const [contestants, setContestants] = useState<Contestant[]>([]);
   const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({});
   const [editingContestantId, setEditingContestantId] = useState<string | null>(null);
-  const [manageOpen, setManageOpen] = useState(false);
   const [connection, setConnection] = useState(supabaseConfigured ? "Offline" : "Supabase env missing");
-  const [onlineUsers, setOnlineUsers] = useState<Record<UserName, boolean>>({ Ian: false, Spike: false });
-  const [lastReceived, setLastReceived] = useState<CueEvent | null>(null);
-  const [flashKey, setFlashKey] = useState(0);
-  const [flashActive, setFlashActive] = useState(false);
+  const [onlineUsers, setOnlineUsers] = useState<Record<string, boolean>>({});
   const [now, setNow] = useState(new Date());
-  const [newPreset, setNewPreset] = useState("");
   const [statusNote, setStatusNote] = useState("");
   const channelRef = useRef<RealtimeChannel | null>(null);
   const supabaseRef = useRef<SupabaseClient | null>(null);
-  const flashTimerRef = useRef<number | null>(null);
-  const chatFlashTimerRef = useRef<number | null>(null);
-  const lastIncomingChatAtRef = useRef<number | null>(null);
+  const cueTimerRef = useRef<number | null>(null);
+  const pendingAttentionTimerRef = useRef<number | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
 
   const roomName = getRoomName();
-  const currentUser = user || "Ian";
-  const recipient = otherUser(currentUser);
+  const activePeople = useMemo(() => sortedPeople(people), [people]);
+  const selectableTargets = useMemo(() => [EVERYONE, ...activePeople.map((person) => person.name)], [activePeople]);
+  const sortedContestants = useMemo(() => [...contestants].sort((a, b) => a.sort_order - b.sort_order), [contestants]);
+  const personNames = useMemo(() => activePeople.map((person) => person.name), [activePeople]);
+  const fallbackTarget = useMemo(() => personNames.find((name) => name !== user) || personNames[0] || EVERYONE, [personNames, user]);
+  const effectiveChatTarget = chatTarget === EVERYONE || personNames.includes(chatTarget) ? chatTarget : fallbackTarget;
+  const effectiveAttentionTarget = attentionTarget === EVERYONE || personNames.includes(attentionTarget) ? attentionTarget : fallbackTarget;
   const realtimeReady = supabaseConfigured && connection === "Live";
+  const currentUser = user || "";
+  const isAttentionPending = Boolean(pendingAttentionId);
+  const attentionLabel = effectiveAttentionTarget === EVERYONE ? "GET EVERYONE" : `GET ${effectiveAttentionTarget}`;
   const realtimeProblem = supabaseConfigured
-    ? "Waiting for Supabase realtime. Cues are disabled until this page says Live."
-    : "Missing Supabase URL and anon key in Vercel. Cues cannot reach the other device.";
-  const visiblePresets = useMemo(
-    () => sortedPresets(presets.filter((preset) => preset.sender === currentUser && preset.active)),
-    [currentUser, presets]
-  );
-  const managedPresets = useMemo(
-    () => sortedPresets(presets.filter((preset) => preset.sender === currentUser)),
-    [currentUser, presets]
-  );
-  const sortedContestants = useMemo(
-    () => [...contestants].sort((a, b) => a.sort_order - b.sort_order),
-    [contestants]
-  );
+    ? "Waiting for live sync. Attention and chat are disabled until this page says Live."
+    : "Missing Supabase URL and anon key in Vercel. Live sync cannot reach the other screens.";
 
-  const loadPresets = useCallback(
+  const loadPeople = useCallback(
     async (supabase: SupabaseClient) => {
       const { data, error } = await supabase
-        .from("cue_presets")
-        .select("id,label,sender,sort_order,active")
+        .from("session_people")
+        .select("id,room_name,name,sort_order,active,created_at,updated_at")
         .eq("room_name", roomName)
-        .order("sender")
-        .order("sort_order");
+        .order("sort_order")
+        .order("name");
 
       if (error) {
-        setStatusNote("Preset table unavailable. Using starter messages.");
-        setPresets(DEFAULT_PRESETS.map(makePreset));
+        setStatusNote("People table unavailable. Run the latest Supabase schema.");
         return;
       }
 
       if (!data?.length) {
-        const seeded = DEFAULT_PRESETS.map((preset) => ({ ...preset, room_name: roomName }));
-        const insert = await supabase.from("cue_presets").insert(seeded).select("id,label,sender,sort_order,active");
-        setPresets(insert.data?.length ? (insert.data as Preset[]) : DEFAULT_PRESETS.map(makePreset));
+        const seed = DEFAULT_PEOPLE.map((person) => ({ ...person, room_name: roomName }));
+        const insert = await supabase
+          .from("session_people")
+          .insert(seed)
+          .select("id,room_name,name,sort_order,active,created_at,updated_at")
+          .order("sort_order");
+        setPeople((insert.data || []) as Person[]);
         return;
       }
 
-      setPresets(data as Preset[]);
+      setPeople(data as Person[]);
     },
     [roomName]
   );
 
   const loadChatMessages = useCallback(
     async (supabase: SupabaseClient) => {
+      const since = new Date(Date.now() - CHAT_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
       const { data } = await supabase
         .from("chat_messages")
-        .select("id,room_name,sender,body,seen_by,acknowledged_by,flashing_for,created_at")
+        .select("id,room_name,sender,recipient,body,seen_by,acknowledged_by,flashing_for,created_at")
         .eq("room_name", roomName)
-        .order("created_at", { ascending: false })
-        .limit(50);
+        .gte("created_at", since)
+        .order("created_at", { ascending: true })
+        .limit(100);
 
-      setChatMessages(((data || []) as ChatMessage[]).reverse());
+      setChatMessages((data || []) as ChatMessage[]);
     },
     [roomName]
   );
@@ -207,78 +201,43 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
     }
   }, []);
 
-  const stopFlash = useCallback(() => {
-    if (flashTimerRef.current) {
-      window.clearTimeout(flashTimerRef.current);
-      flashTimerRef.current = null;
+  const stopCueFlash = useCallback(() => {
+    if (cueTimerRef.current) {
+      window.clearTimeout(cueTimerRef.current);
+      cueTimerRef.current = null;
     }
-    setFlashActive(false);
+    setActiveCue(null);
   }, []);
 
-  const triggerFlash = useCallback(() => {
-    if (flashTimerRef.current) {
-      window.clearTimeout(flashTimerRef.current);
+  const stopPendingAttention = useCallback(() => {
+    if (pendingAttentionTimerRef.current) {
+      window.clearTimeout(pendingAttentionTimerRef.current);
+      pendingAttentionTimerRef.current = null;
     }
-    setFlashKey((key) => key + 1);
-    setFlashActive(true);
-    flashTimerRef.current = window.setTimeout(() => {
-      setFlashActive(false);
-      flashTimerRef.current = null;
-    }, 20_000);
+    setPendingAttentionId(null);
   }, []);
 
-  const stopChatFlash = useCallback(
-    async (message?: ChatMessage) => {
-      if (chatFlashTimerRef.current) {
-        window.clearTimeout(chatFlashTimerRef.current);
-        chatFlashTimerRef.current = null;
-      }
-      setChatFlashActive(false);
+  const startCueFlash = useCallback((cue: CueEvent) => {
+    if (cueTimerRef.current) {
+      window.clearTimeout(cueTimerRef.current);
+    }
+    setActiveCue(cue);
+    cueTimerRef.current = window.setTimeout(() => {
+      setActiveCue(null);
+      cueTimerRef.current = null;
+    }, ATTENTION_TIMEOUT_MS);
+  }, []);
 
-      if (message && user) {
-        await supabaseRef.current
-          ?.from("chat_messages")
-          .update({ flashing_for: userListWithout(message.flashing_for, user) })
-          .eq("id", message.id);
-      }
-    },
-    [user]
-  );
-
-  const handleIncomingChatMessage = useCallback(
-    async (message: ChatMessage) => {
-      if (!user || message.sender === user) return;
-
-      const nowMs = Date.now();
-      const shouldFlash = lastIncomingChatAtRef.current === null || nowMs - lastIncomingChatAtRef.current > CHAT_ATTENTION_GAP_MS;
-      lastIncomingChatAtRef.current = nowMs;
-
-      const nextSeenBy = userListWith(message.seen_by, user);
-      const nextFlashingFor = shouldFlash ? userListWith(message.flashing_for, user) : message.flashing_for;
-
-      await supabaseRef.current
-        ?.from("chat_messages")
-        .update({
-          seen_by: nextSeenBy,
-          flashing_for: nextFlashingFor
-        })
-        .eq("id", message.id);
-
-      if (!shouldFlash) return;
-
-      if (chatFlashTimerRef.current) {
-        window.clearTimeout(chatFlashTimerRef.current);
-      }
-
-      setChatFlashKey((key) => key + 1);
-      setChatFlashActive(true);
-      const flashingMessage = { ...message, seen_by: nextSeenBy, flashing_for: nextFlashingFor };
-      chatFlashTimerRef.current = window.setTimeout(() => {
-        void stopChatFlash(flashingMessage);
-      }, CHAT_FLASH_MS);
-    },
-    [stopChatFlash, user]
-  );
+  const startPendingAttention = useCallback((cueId: string) => {
+    if (pendingAttentionTimerRef.current) {
+      window.clearTimeout(pendingAttentionTimerRef.current);
+    }
+    setPendingAttentionId(cueId);
+    pendingAttentionTimerRef.current = window.setTimeout(() => {
+      setPendingAttentionId(null);
+      pendingAttentionTimerRef.current = null;
+    }, ATTENTION_TIMEOUT_MS);
+  }, []);
 
   useEffect(() => {
     fetch("/api/auth/status")
@@ -300,14 +259,23 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
 
   useEffect(() => {
     return () => {
-      if (flashTimerRef.current) {
-        window.clearTimeout(flashTimerRef.current);
-      }
-      if (chatFlashTimerRef.current) {
-        window.clearTimeout(chatFlashTimerRef.current);
-      }
+      if (cueTimerRef.current) window.clearTimeout(cueTimerRef.current);
+      if (pendingAttentionTimerRef.current) window.clearTimeout(pendingAttentionTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!authenticated || user) return;
+
+    const supabase = createSupabaseBrowserClient();
+    supabaseRef.current = supabase;
+
+    if (!supabase) return;
+
+    queueMicrotask(() => {
+      void loadPeople(supabase);
+    });
+  }, [authenticated, loadPeople, user]);
 
   useEffect(() => {
     if (!authenticated || !user) return;
@@ -315,12 +283,10 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
     const supabase = createSupabaseBrowserClient();
     supabaseRef.current = supabase;
 
-    if (!supabase) {
-      return;
-    }
+    if (!supabase) return;
 
     queueMicrotask(() => {
-      void loadPresets(supabase);
+      void loadPeople(supabase);
       void loadChatMessages(supabase);
       void loadContestants(supabase);
     });
@@ -331,28 +297,29 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
 
     channel
       .on("broadcast", { event: "cue" }, ({ payload }: { payload: CueEvent }) => {
-        if (payload.to !== user) return;
-        setLastReceived(payload);
-        setStatusNote(`${payload.from}: ${payload.message}`);
-        triggerFlash();
-        showNotification(`The Spike: ${payload.from}`, payload.message);
+        if (!isForPerson(payload.to, user) || payload.from === user) return;
+        startCueFlash(payload);
+        setStatusNote(`${payload.from} requested ${payload.to === EVERYONE ? "everyone" : "your"} attention`);
+        showNotification(`The Spike: ${payload.from}`, "Requested attention");
       })
       .on("broadcast", { event: "ack" }, ({ payload }: { payload: AckEvent }) => {
         if (payload.to !== user) return;
-        setStatusNote(`${payload.from} acknowledged ${payload.message}`);
+        stopPendingAttention();
+        setStatusNote(`${payload.from} acknowledged your attention request`);
       })
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState();
-        setOnlineUsers({
-          Ian: Boolean(state.Ian?.length),
-          Spike: Boolean(state.Spike?.length)
+        const next: Record<string, boolean> = {};
+        Object.keys(state).forEach((name) => {
+          next[name] = Boolean(state[name]?.length);
         });
+        setOnlineUsers(next);
       })
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "cue_presets", filter: `room_name=eq.${roomName}` },
+        { event: "*", schema: "public", table: "session_people", filter: `room_name=eq.${roomName}` },
         () => {
-          void loadPresets(supabase);
+          void loadPeople(supabase);
         }
       )
       .on(
@@ -360,8 +327,12 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
         { event: "*", schema: "public", table: "chat_messages", filter: `room_name=eq.${roomName}` },
         (payload) => {
           const change = payload as unknown as { eventType: string; new: ChatMessage };
-          if (change.eventType === "INSERT" && change.new) {
-            void handleIncomingChatMessage(change.new);
+          if (change.eventType === "INSERT" && change.new && change.new.sender !== user && isForPerson(change.new.recipient, user)) {
+            const message = change.new;
+            void supabase
+              .from("chat_messages")
+              .update({ seen_by: nameListWith(message.seen_by, user) })
+              .eq("id", message.id);
           }
           void loadChatMessages(supabase);
         }
@@ -386,26 +357,36 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
       channel.unsubscribe();
       channelRef.current = null;
     };
-  }, [authenticated, handleIncomingChatMessage, loadChatMessages, loadContestants, loadPresets, roomName, showNotification, triggerFlash, user]);
+  }, [
+    authenticated,
+    loadChatMessages,
+    loadContestants,
+    loadPeople,
+    roomName,
+    showNotification,
+    startCueFlash,
+    stopPendingAttention,
+    user
+  ]);
 
   useEffect(() => {
-    if (!lastReceived) {
+    if (!activeCue) {
       document.title = "The Spike";
       return;
     }
 
     let urgent = true;
-    document.title = `!!! ${lastReceived.from}: ${lastReceived.message}`;
+    document.title = `!!! ${activeCue.from} needs attention`;
     const titleTimer = window.setInterval(() => {
       urgent = !urgent;
-      document.title = urgent ? `!!! ${lastReceived.from}: ${lastReceived.message}` : "The Spike";
+      document.title = urgent ? `!!! ${activeCue.from} needs attention` : "The Spike";
     }, 700);
 
     return () => {
       window.clearInterval(titleTimer);
       document.title = "The Spike";
     };
-  }, [lastReceived]);
+  }, [activeCue]);
 
   async function submitPasscode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -427,7 +408,7 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
     setPasscode("");
   }
 
-  function chooseUser(nextUser: UserName) {
+  function chooseUser(nextUser: string) {
     setUser(nextUser);
     window.localStorage.setItem(STORAGE_USER, nextUser);
   }
@@ -436,28 +417,68 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthenticated(false);
     setUser("");
-    setLastReceived(null);
+    setActiveCue(null);
+    stopPendingAttention();
   }
 
-  async function sendCue(message: string) {
-    if (!message.trim() || !user) return;
+  async function addPerson(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const clean = newPerson.trim().replace(/\s+/g, " ");
+    const supabase = supabaseRef.current;
 
-    if (!channelRef.current || !realtimeReady) {
-      triggerFlash();
-      setStatusNote("Realtime is not connected. Add Supabase URL and anon key in Vercel.");
-      return;
+    if (!clean || !supabase) return;
+
+    const sortOrder = Math.max(0, ...activePeople.map((person) => person.sort_order)) + 10;
+    const { data, error } = await supabase
+      .from("session_people")
+      .upsert({ room_name: roomName, name: clean, sort_order: sortOrder, active: true }, { onConflict: "room_name,name" })
+      .select("id,room_name,name,sort_order,active,created_at,updated_at")
+      .single();
+
+    if (!error && data) {
+      setNewPerson("");
+      setPeople((items) => {
+        const filtered = items.filter((item) => item.id !== data.id && item.name !== data.name);
+        return sortedPeople([...filtered, data as Person]);
+      });
     }
+  }
+
+  async function sendAttention() {
+    if (!user || !channelRef.current || !realtimeReady) return;
 
     const cue: CueEvent = {
       id: crypto.randomUUID(),
-      message: message.trim(),
       from: user,
-      to: otherUser(user),
+      to: effectiveAttentionTarget,
       sentAt: new Date().toISOString()
     };
 
-    setStatusNote(`Sent to ${cue.to}: ${cue.message}`);
-    await channelRef.current?.send({ type: "broadcast", event: "cue", payload: cue });
+    startPendingAttention(cue.id);
+    setStatusNote(`Requested ${effectiveAttentionTarget === EVERYONE ? "everyone" : effectiveAttentionTarget}`);
+    await channelRef.current.send({ type: "broadcast", event: "cue", payload: cue });
+    await supabaseRef.current?.from("chat_messages").insert({
+      room_name: roomName,
+      sender: user,
+      recipient: effectiveAttentionTarget,
+      body: `${user} requested attention`
+    });
+  }
+
+  async function acknowledgeAttention() {
+    if (!activeCue || !user) return;
+    const cue = activeCue;
+    stopCueFlash();
+
+    const ack: AckEvent = {
+      cueId: cue.id,
+      from: user,
+      to: cue.from,
+      sentAt: new Date().toISOString()
+    };
+
+    setStatusNote(`Acknowledged ${cue.from}`);
+    await channelRef.current?.send({ type: "broadcast", event: "ack", payload: ack });
   }
 
   async function sendChatMessage(event: FormEvent<HTMLFormElement>) {
@@ -471,6 +492,7 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
     const { error } = await supabase.from("chat_messages").insert({
       room_name: roomName,
       sender: user,
+      recipient: effectiveChatTarget,
       body: clean
     });
 
@@ -485,13 +507,12 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
   async function acknowledgeChatMessage(message: ChatMessage) {
     if (!user) return;
 
-    await stopChatFlash(message);
     await supabaseRef.current
       ?.from("chat_messages")
       .update({
-        seen_by: userListWith(message.seen_by, user),
-        acknowledged_by: userListWith(message.acknowledged_by, user),
-        flashing_for: userListWithout(message.flashing_for, user)
+        seen_by: nameListWith(message.seen_by, user),
+        acknowledged_by: nameListWith(message.acknowledged_by, user),
+        flashing_for: nameListWithout(message.flashing_for, user)
       })
       .eq("id", message.id);
   }
@@ -499,79 +520,27 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
   function chatStatus(message: ChatMessage) {
     if (message.sender !== currentUser) return "";
 
-    const statuses = ["Sent"];
-    if (message.seen_by.includes(recipient)) statuses.push("Seen");
-    if (message.flashing_for.includes(recipient)) statuses.push("Flashing");
-    if (message.acknowledged_by.includes(recipient)) statuses.push("Acknowledged");
+    if (message.recipient === EVERYONE) {
+      const others = activePeople.map((person) => person.name).filter((name) => name !== currentUser);
+      const seenCount = others.filter((name) => message.seen_by.includes(name)).length;
+      const ackCount = others.filter((name) => message.acknowledged_by.includes(name)).length;
+      return `Sent · Seen ${seenCount}/${others.length} · Ack ${ackCount}/${others.length}`;
+    }
 
+    const statuses = ["Sent"];
+    if (message.seen_by.includes(message.recipient)) statuses.push("Seen");
+    if (message.acknowledged_by.includes(message.recipient)) statuses.push("Acknowledged");
     return statuses.join(" · ");
   }
 
-  async function acknowledgeCue() {
-    if (!lastReceived || !user) return;
-    stopFlash();
-
-    const ack: AckEvent = {
-      cueId: lastReceived.id,
-      from: user,
-      to: lastReceived.from,
-      message: lastReceived.message,
-      sentAt: new Date().toISOString()
-    };
-
-    setLastReceived(null);
-    setStatusNote(`Acknowledged ${ack.to}`);
-    await channelRef.current?.send({ type: "broadcast", event: "ack", payload: ack });
+  function changeChatTarget(nextTarget: TargetName) {
+    setChatTarget(nextTarget);
+    window.localStorage.setItem(STORAGE_CHAT_TARGET, nextTarget);
   }
 
-  async function savePreset(label: string) {
-    const clean = label.trim();
-    if (!clean || !user) return;
-
-    const supabase = supabaseRef.current;
-    if (!supabase) {
-      triggerFlash();
-      setStatusNote("Preset saving needs Supabase URL and anon key in Vercel.");
-      return;
-    }
-
-    const sortOrder = Math.max(0, ...managedPresets.map((preset) => preset.sort_order)) + 10;
-    const optimistic = makePreset({ label: clean, sender: user, sort_order: sortOrder, active: true });
-    setPresets((items) => [...items, optimistic]);
-    setNewPreset("");
-
-    const { data } = await supabase
-      .from("cue_presets")
-      .insert({ label: clean, sender: user, sort_order: sortOrder, active: true, room_name: roomName })
-      .select("id,label,sender,sort_order,active")
-      .single();
-
-    if (data) {
-      setPresets((items) => items.map((preset) => (preset.id === optimistic.id ? (data as Preset) : preset)));
-    }
-  }
-
-  async function updatePreset(id: string, patch: Partial<Preset>) {
-    setPresets((items) => items.map((preset) => (preset.id === id ? { ...preset, ...patch } : preset)));
-    await supabaseRef.current?.from("cue_presets").update(patch).eq("id", id);
-  }
-
-  async function deletePreset(id: string) {
-    setPresets((items) => items.filter((preset) => preset.id !== id));
-    await supabaseRef.current?.from("cue_presets").delete().eq("id", id);
-  }
-
-  async function movePreset(id: string, direction: -1 | 1) {
-    const list = managedPresets;
-    const index = list.findIndex((preset) => preset.id === id);
-    const swap = list[index + direction];
-    const item = list[index];
-    if (!item || !swap) return;
-
-    await Promise.all([
-      updatePreset(item.id, { sort_order: swap.sort_order }),
-      updatePreset(swap.id, { sort_order: item.sort_order })
-    ]);
+  function changeAttentionTarget(nextTarget: TargetName) {
+    setAttentionTarget(nextTarget);
+    window.localStorage.setItem(STORAGE_ATTENTION_TARGET, nextTarget);
   }
 
   async function updateContestant(id: string, patch: Partial<Contestant>) {
@@ -591,7 +560,6 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
     const patch = result === "correct" ? { correct_count: contestant.correct_count + 1 } : { wrong_count: contestant.wrong_count + 1 };
 
     if (result === "wrong" && finalScore(contestant) === 0) return;
-
     await updateContestant(contestant.id, patch);
   }
 
@@ -610,7 +578,13 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
     if ("Notification" in window && Notification.permission === "default") {
       await Notification.requestPermission();
     }
-    triggerFlash();
+    const cue: CueEvent = {
+      id: crypto.randomUUID(),
+      from: "Test",
+      to: user || EVERYONE,
+      sentAt: new Date().toISOString()
+    };
+    startCueFlash(cue);
     await showNotification("The Spike test", "Local alert is working.");
     setStatusNote("Local alert and flash tested.");
   }
@@ -622,11 +596,11 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
   if (!authenticated) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-ink p-5">
-        <form onSubmit={submitPasscode} className="w-full max-w-sm border border-line bg-panel p-5">
+        <form onSubmit={submitPasscode} className="w-full max-w-sm rounded-lg border border-line bg-panel p-5 shadow-2xl">
           <h1 className="text-4xl font-black text-signal">The Spike</h1>
-          <p className="mt-2 text-lg text-slate-200">Private cue room</p>
+          <p className="mt-2 text-sm uppercase tracking-wide text-slate-300">Private cue room</p>
           <input
-            className="mt-6 w-full border border-line bg-ink px-4 py-4 text-2xl text-white"
+            className="mt-6 w-full rounded-md border border-line bg-ink px-4 py-3 text-xl text-white"
             type="password"
             value={passcode}
             onChange={(event) => setPasscode(event.target.value)}
@@ -634,7 +608,7 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
             autoFocus
           />
           {authError ? <p className="mt-3 text-warn">{authError}</p> : null}
-          <button className="mt-5 w-full bg-signal px-5 py-4 text-2xl font-black text-black" type="submit">
+          <button className="mt-5 w-full rounded-md bg-signal px-5 py-3 text-xl font-black text-black" type="submit">
             Enter
           </button>
         </form>
@@ -645,20 +619,24 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
   if (!user) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-ink p-5">
-        <section className="w-full max-w-sm border border-line bg-panel p-5">
+        <section className="w-full max-w-md rounded-lg border border-line bg-panel p-5">
           <h1 className="text-4xl font-black text-signal">The Spike</h1>
-          <p className="mt-2 text-lg text-slate-200">Choose who is using this window.</p>
-          <div className="mt-6 grid gap-3">
-            {USERS.map((name) => (
-              <button
-                key={name}
-                className="border border-line bg-white px-5 py-6 text-3xl font-black text-black"
-                onClick={() => chooseUser(name)}
-                type="button"
-              >
-                {name}
-              </button>
-            ))}
+          <p className="mt-2 text-sm uppercase tracking-wide text-slate-300">Choose who is using this window</p>
+          <div className="mt-5 grid gap-2">
+            {activePeople.length ? (
+              activePeople.map((person) => (
+                <button
+                  key={person.id}
+                  className="rounded-md border border-line bg-white px-5 py-4 text-2xl font-black text-black"
+                  onClick={() => chooseUser(person.name)}
+                  type="button"
+                >
+                  {person.name}
+                </button>
+              ))
+            ) : (
+              <div className="rounded-md border border-line bg-ink p-4 text-sm text-slate-300">Connect once so the people list can load.</div>
+            )}
           </div>
         </section>
       </main>
@@ -667,227 +645,236 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
 
   return (
     <main className="min-h-screen bg-ink text-white">
-      {flashActive ? (
+      {activeCue ? (
         <button
-          key={flashKey}
           className="cue-flash"
-          aria-label="Stop flashing alert"
-          onClick={stopFlash}
-          onPointerDown={stopFlash}
+          aria-label={`Acknowledge attention request from ${activeCue.from}`}
+          onClick={acknowledgeAttention}
+          onPointerDown={acknowledgeAttention}
           type="button"
-        />
+        >
+          <span className="sr-only">Acknowledge attention request</span>
+        </button>
       ) : null}
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 p-3 sm:p-4">
+
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-3 p-3 lg:p-4">
         {!realtimeReady ? (
-          <section className="sticky top-0 z-50 border-4 border-warn bg-warn p-4 text-black shadow-2xl">
-            <p className="text-xl font-black uppercase">Realtime is not connected</p>
-            <div className="mt-1 text-3xl font-black leading-tight">{realtimeProblem}</div>
+          <section className="sticky top-0 z-50 rounded-md border border-warn bg-warn px-4 py-3 text-black shadow-2xl">
+            <p className="text-sm font-black uppercase">Live sync is not connected</p>
+            <div className="mt-1 text-lg font-black leading-tight">{realtimeProblem}</div>
           </section>
         ) : null}
 
-        <header className="border border-line bg-panel p-3">
-          <div className="flex items-start justify-between gap-3">
+        <header className="rounded-lg border border-line bg-panel px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h1 className="text-3xl font-black leading-none text-signal sm:text-5xl">The Spike</h1>
-              <p className="mt-1 text-sm uppercase tracking-wide text-slate-300">
-                {currentUser} to {recipient} - {roomName}
+              <h1 className="text-3xl font-black leading-none text-signal">The Spike</h1>
+              <p className="mt-1 text-xs uppercase tracking-wide text-slate-400">
+                {currentUser} · {roomName} · {connection}
               </p>
-              <div className="mt-2 flex flex-wrap gap-2 text-sm font-black uppercase">
-                {USERS.map((name) => (
-                  <span key={name} className="border border-line bg-ink px-2 py-1">
-                    <span className={onlineUsers[name] ? "text-good" : "text-slate-500"}>{onlineUsers[name] ? "ON" : "OFF"}</span> {name}
-                  </span>
-                ))}
-              </div>
             </div>
-            <div className="text-right">
-              <div className="text-3xl font-black tabular-nums">{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
-              <div className="text-sm text-slate-300">{connection}</div>
+            <div className="flex items-center gap-3">
+              <select
+                className="rounded-md border border-line bg-ink px-3 py-2 text-sm font-bold text-white"
+                value={currentUser}
+                onChange={(event) => chooseUser(event.target.value)}
+              >
+                {activePeople.map((person) => (
+                  <option key={person.id} value={person.name}>
+                    I am {person.name}
+                  </option>
+                ))}
+              </select>
+              <div className="text-right">
+                <div className="text-2xl font-black tabular-nums">{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+                <button className="text-xs font-bold uppercase text-slate-400 underline-offset-4 hover:underline" onClick={logout} type="button">
+                  Logout
+                </button>
+              </div>
             </div>
           </div>
         </header>
 
-        <section key={chatFlashKey} className={`border bg-panel p-3 ${chatFlashActive ? "chat-flash border-signal" : "border-line"}`}>
-          <div ref={chatRef} className="max-h-36 overflow-y-auto border border-line bg-ink p-2">
-            {chatMessages.length ? (
-              chatMessages.map((message) => (
-                <div key={message.id} className="mb-2 last:mb-0">
-                  <div>
-                    <span className={message.sender === currentUser ? "font-black text-cold" : "font-black text-signal"}>{message.sender}</span>
-                    <span className="ml-2 whitespace-pre-wrap text-lg font-bold">{message.body}</span>
-                  </div>
-                  {message.sender === currentUser ? (
-                    <div className="mt-1 text-xs font-black uppercase text-slate-400">{chatStatus(message)}</div>
-                  ) : !message.acknowledged_by.includes(currentUser) ? (
-                    <button
-                      className="mt-2 border border-line bg-signal px-3 py-2 text-sm font-black text-black"
-                      onClick={() => acknowledgeChatMessage(message)}
-                      type="button"
-                    >
-                      Acknowledge
-                    </button>
-                  ) : (
-                    <div className="mt-1 text-xs font-black uppercase text-good">Acknowledged</div>
-                  )}
-                </div>
-              ))
-            ) : (
-              <div className="text-lg font-bold text-slate-500">No chat yet</div>
-            )}
+        <section className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
+          <div className="rounded-lg border border-line bg-panel p-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-sm font-black uppercase tracking-wide text-slate-300">Live chat</h2>
+              <label className="flex items-center gap-2 text-sm font-bold text-slate-300">
+                To
+                <select
+                  className="rounded-md border border-line bg-ink px-2 py-1 text-white"
+                  value={effectiveChatTarget}
+                  onChange={(event) => changeChatTarget(event.target.value)}
+                >
+                  {selectableTargets.map((target) => (
+                    <option key={target} value={target}>
+                      {target}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div ref={chatRef} className="h-44 overflow-y-auto rounded-md border border-line bg-ink p-3 lg:h-52">
+              {chatMessages.length ? (
+                chatMessages.map((message) => {
+                  const incoming = message.sender !== currentUser && isForPerson(message.recipient, currentUser);
+                  const acknowledged = message.acknowledged_by.includes(currentUser);
+                  return (
+                    <div key={message.id} className={`mb-3 max-w-[92%] last:mb-0 ${message.sender === currentUser ? "ml-auto text-right" : ""}`}>
+                      <div className={`rounded-md px-3 py-2 ${message.sender === currentUser ? "bg-cold text-black" : "bg-panel text-white"}`}>
+                        <div className="mb-1 text-[11px] font-black uppercase tracking-wide opacity-70">
+                          {message.sender} to {message.recipient} · {displayTime(message.created_at)}
+                        </div>
+                        <div className="whitespace-pre-wrap text-sm font-bold leading-snug">{message.body}</div>
+                      </div>
+                      {message.sender === currentUser ? (
+                        <div className="mt-1 text-[11px] font-black uppercase text-slate-500">{chatStatus(message)}</div>
+                      ) : incoming && !acknowledged ? (
+                        <button
+                          className="mt-1 rounded-md border border-line bg-signal px-2 py-1 text-xs font-black text-black"
+                          onClick={() => acknowledgeChatMessage(message)}
+                          type="button"
+                        >
+                          Acknowledge
+                        </button>
+                      ) : incoming ? (
+                        <div className="mt-1 text-[11px] font-black uppercase text-good">Acknowledged</div>
+                      ) : null}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="text-sm font-bold text-slate-500">No chat in the last 4 hours</div>
+              )}
+            </div>
+
+            <form className="mt-2 flex gap-2" onSubmit={sendChatMessage}>
+              <textarea
+                className="min-h-11 min-w-0 flex-1 resize-none rounded-md border border-line bg-ink px-3 py-2 text-sm font-bold text-white"
+                value={chatDraft}
+                onChange={(event) => setChatDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                placeholder={`Message ${effectiveChatTarget}`}
+                disabled={!realtimeReady}
+                maxLength={1000}
+              />
+              <button className="rounded-md bg-cold px-5 py-2 text-sm font-black text-black" disabled={!realtimeReady || !chatDraft.trim()} type="submit">
+                Send
+              </button>
+            </form>
+            {chatError ? <div className="mt-2 text-xs font-black text-warn">{chatError}</div> : null}
           </div>
-          <form className="mt-2 flex gap-2" onSubmit={sendChatMessage}>
-            <textarea
-              className="min-h-14 min-w-0 flex-1 resize-none border border-line bg-ink px-3 py-3 text-xl font-black text-white"
-              value={chatDraft}
-              onChange={(event) => setChatDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-              placeholder={`Chat to ${recipient}`}
-              disabled={!realtimeReady}
-              maxLength={1000}
-            />
-            <button className="bg-cold px-5 py-3 text-xl font-black text-black" disabled={!realtimeReady || !chatDraft.trim()} type="submit">
-              Send
-            </button>
-          </form>
-          {chatError ? <div className="mt-2 text-sm font-black text-warn">{chatError}</div> : null}
-        </section>
 
-        {lastReceived ? (
-          <section className="border-4 border-signal bg-signal p-4 text-black">
-            <p className="text-lg font-black uppercase">Cue from {lastReceived.from}</p>
-            <div className="mt-1 text-5xl font-black leading-tight">{lastReceived.message}</div>
-            <button className="mt-4 w-full bg-black px-5 py-4 text-2xl font-black text-white" onClick={acknowledgeCue} type="button">
-              Acknowledge
-            </button>
-          </section>
-        ) : null}
+          <aside className="grid gap-3">
+            <section className="rounded-lg border border-line bg-panel p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h2 className="text-sm font-black uppercase tracking-wide text-slate-300">Attention</h2>
+                <select
+                  className="rounded-md border border-line bg-ink px-2 py-1 text-sm font-bold text-white"
+                  value={effectiveAttentionTarget}
+                  onChange={(event) => changeAttentionTarget(event.target.value)}
+                >
+                  {selectableTargets.map((target) => (
+                    <option key={target} value={target}>
+                      {target}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                className={`h-20 w-full rounded-md border text-2xl font-black leading-none transition ${
+                  isAttentionPending
+                    ? "animate-pulse border-signal bg-signal text-black shadow-[0_0_0_4px_rgba(247,212,74,0.25)]"
+                    : "border-signal bg-signal text-black active:translate-y-px"
+                } ${!realtimeReady ? "cursor-not-allowed opacity-50" : ""}`}
+                disabled={!realtimeReady}
+                onClick={sendAttention}
+                type="button"
+              >
+                {attentionLabel}
+              </button>
+              <p className="mt-2 min-h-4 text-xs font-bold text-slate-400">
+                {isAttentionPending ? "Waiting for acknowledgement..." : statusNote || "Ready"}
+              </p>
+            </section>
 
-        <section className="grid grid-cols-2 gap-2">
-          {visiblePresets.map((preset) => (
-            <button
-              key={preset.id}
-              className={`min-h-24 border border-line px-3 py-5 text-2xl font-black leading-tight active:translate-y-px sm:text-3xl ${
-                realtimeReady ? "bg-white text-black" : "cursor-not-allowed bg-slate-800 text-slate-400"
-              }`}
-              disabled={!realtimeReady}
-              onClick={() => sendCue(preset.label)}
-              type="button"
-            >
-              {preset.label}
-            </button>
-          ))}
-        </section>
-
-        <section className="border border-line bg-panel p-3">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-xl font-black uppercase text-slate-200">Scoreboard</h2>
-            <button className="border border-line bg-ink px-3 py-2 text-sm font-black" onClick={resetScores} type="button">
-              Reset Scores
-            </button>
-          </div>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            {sortedContestants.map((contestant) => (
-              <div key={contestant.id} className="border-8 border-black bg-white p-3 text-black">
+            <section className="rounded-lg border border-line bg-panel p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h2 className="text-sm font-black uppercase tracking-wide text-slate-300">People</h2>
+                <button className="text-xs font-bold uppercase text-slate-400 underline-offset-4 hover:underline" onClick={testLocalAlert} type="button">
+                  Test
+                </button>
+              </div>
+              <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto">
+                {activePeople.map((person) => (
+                  <span key={person.id} className="rounded-full border border-line bg-ink px-2 py-1 text-xs font-black">
+                    <span className={onlineUsers[person.name] ? "text-good" : "text-slate-500"}>{onlineUsers[person.name] ? "ON" : "OFF"}</span>{" "}
+                    {person.name}
+                  </span>
+                ))}
+              </div>
+              <form className="mt-2 flex gap-2" onSubmit={addPerson}>
                 <input
-                  className="w-full border-0 bg-[#5a5f66] px-3 py-4 text-4xl font-black text-white placeholder:text-white"
-                  value={nameDrafts[contestant.id] ?? contestant.name}
-                  onBlur={() => commitContestantName(contestant)}
-                  onChange={(event) => {
-                    const nextName = event.target.value;
-                    setNameDrafts((drafts) => ({ ...drafts, [contestant.id]: nextName }));
-                  }}
-                  onFocus={() => setEditingContestantId(contestant.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.currentTarget.blur();
-                    }
-                  }}
-                  placeholder={`Contestant ${contestant.sort_order}`}
+                  className="min-w-0 flex-1 rounded-md border border-line bg-ink px-3 py-2 text-sm font-bold text-white"
+                  value={newPerson}
+                  onChange={(event) => setNewPerson(event.target.value)}
+                  placeholder="Add person"
+                  maxLength={40}
                 />
-                <div className="mt-3 grid grid-cols-2 gap-4">
-                  <button className="bg-[#00ff00] px-3 py-5 text-5xl font-black text-black" onClick={() => markAnswer(contestant, "correct")} type="button">
+                <button className="rounded-md border border-line bg-white px-3 py-2 text-sm font-black text-black" disabled={!newPerson.trim()} type="submit">
+                  Add
+                </button>
+              </form>
+            </section>
+          </aside>
+        </section>
+
+        <section className="rounded-lg border border-line bg-panel p-3">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-black uppercase tracking-wide text-slate-300">Scoreboard</h2>
+            <button className="rounded-md border border-line bg-ink px-3 py-2 text-xs font-black" onClick={resetScores} type="button">
+              Reset
+            </button>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {sortedContestants.map((contestant) => (
+              <div key={contestant.id} className="rounded-lg border border-line bg-ink p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <input
+                    className="min-w-0 flex-1 rounded-md border border-line bg-panel px-3 py-2 text-sm font-black text-white placeholder:text-slate-500"
+                    value={nameDrafts[contestant.id] ?? contestant.name}
+                    onBlur={() => commitContestantName(contestant)}
+                    onChange={(event) => {
+                      const nextName = event.target.value;
+                      setNameDrafts((drafts) => ({ ...drafts, [contestant.id]: nextName }));
+                    }}
+                    onFocus={() => setEditingContestantId(contestant.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    placeholder={`Contestant ${contestant.sort_order}`}
+                  />
+                  <div className="rounded-md bg-signal px-3 py-2 text-center text-xl font-black tabular-nums text-black">{finalScore(contestant)}</div>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button className="rounded-md bg-good px-3 py-3 text-lg font-black text-black" onClick={() => markAnswer(contestant, "correct")} type="button">
                     +1
                   </button>
-                  <button className="bg-[#ff1010] px-3 py-5 text-5xl font-black text-white" onClick={() => markAnswer(contestant, "wrong")} type="button">
+                  <button className="rounded-md bg-warn px-3 py-3 text-lg font-black text-black" onClick={() => markAnswer(contestant, "wrong")} type="button">
                     -1
                   </button>
                 </div>
-                <div className="mt-3 bg-[#5a5f66] px-3 py-4 text-center text-4xl font-black text-white">Final Score</div>
-                <div className="mt-3 bg-[#fff200] px-3 py-5 text-center text-5xl font-black text-black">{finalScore(contestant)}</div>
               </div>
             ))}
           </div>
-        </section>
-
-        <section className="border border-line bg-panel p-3">
-          <div className="grid grid-cols-2 gap-2">
-            <button className="border border-line bg-ink px-3 py-3 font-black" onClick={() => setManageOpen((open) => !open)} type="button">
-              Manage Messages
-            </button>
-            <button className="border border-line bg-ink px-3 py-3 font-black" onClick={testLocalAlert} type="button">
-              Test Local Alert
-            </button>
-          </div>
-
-          <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-            <select
-              className="border border-line bg-ink px-3 py-3"
-              value={currentUser}
-              onChange={(event) => chooseUser(event.target.value as UserName)}
-            >
-              {USERS.map((name) => (
-                <option key={name}>{name}</option>
-              ))}
-            </select>
-            <button className="border border-line bg-ink px-3 py-3" onClick={logout} type="button">
-              Logout
-            </button>
-          </div>
-
-          {manageOpen ? (
-            <div className="mt-4 border-t border-line pt-4">
-              <div className="flex gap-2">
-                <input
-                  className="min-w-0 flex-1 border border-line bg-ink px-3 py-3"
-                  value={newPreset}
-                  onChange={(event) => setNewPreset(event.target.value)}
-                  placeholder={`New ${currentUser} cue`}
-                />
-                <button className="bg-signal px-4 py-3 font-black text-black" onClick={() => savePreset(newPreset)} type="button">
-                  Add
-                </button>
-              </div>
-
-              <div className="mt-3 grid gap-2">
-                {managedPresets.map((preset) => (
-                  <div key={preset.id} className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-2">
-                    <input
-                      className="min-w-0 border border-line bg-ink px-3 py-3"
-                      value={preset.label}
-                      onChange={(event) => updatePreset(preset.id, { label: event.target.value })}
-                    />
-                    <button className="border border-line px-3" onClick={() => movePreset(preset.id, -1)} type="button">
-                      Up
-                    </button>
-                    <button className="border border-line px-3" onClick={() => movePreset(preset.id, 1)} type="button">
-                      Down
-                    </button>
-                    <button className="border border-line px-3" onClick={() => updatePreset(preset.id, { active: !preset.active })} type="button">
-                      {preset.active ? "On" : "Off"}
-                    </button>
-                    <button className="border border-line px-3 text-warn" onClick={() => deletePreset(preset.id)} type="button">
-                      Del
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
         </section>
       </div>
     </main>

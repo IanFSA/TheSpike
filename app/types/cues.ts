@@ -1,37 +1,38 @@
-export type UserName = "Ian" | "Spike";
-
-export type Preset = {
+export type Person = {
   id: string;
-  label: string;
-  sender: UserName;
+  room_name: string;
+  name: string;
   sort_order: number;
   active: boolean;
+  created_at: string;
+  updated_at: string;
 };
+
+export type TargetName = string | "Everyone";
 
 export type CueEvent = {
   id: string;
-  message: string;
-  from: UserName;
-  to: UserName;
+  from: string;
+  to: TargetName;
   sentAt: string;
 };
 
 export type AckEvent = {
   cueId: string;
-  from: UserName;
-  to: UserName;
-  message: string;
+  from: string;
+  to: string;
   sentAt: string;
 };
 
 export type ChatMessage = {
   id: string;
   room_name: string;
-  sender: UserName;
+  sender: string;
+  recipient: TargetName;
   body: string;
-  seen_by: UserName[];
-  acknowledged_by: UserName[];
-  flashing_for: UserName[];
+  seen_by: string[];
+  acknowledged_by: string[];
+  flashing_for: string[];
   created_at: string;
 };
 
