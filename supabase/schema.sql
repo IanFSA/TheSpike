@@ -303,3 +303,65 @@ begin
     alter publication supabase_realtime add table public.score_contestants;
   end if;
 end $$;
+
+create table if not exists public.traffic_reports (
+  id uuid primary key default gen_random_uuid(),
+  headline text not null,
+  bulletin text not null,
+  natasha_headline text not null,
+  closer text not null default '',
+  incident_ids text[] not null default '{}',
+  source_checked_at timestamptz not null default now(),
+  generated_by text not null default 'openai' check (generated_by in ('openai', 'fallback')),
+  published boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists traffic_reports_published_created_idx
+  on public.traffic_reports (published, created_at desc);
+
+alter table public.traffic_reports enable row level security;
+
+drop policy if exists "Traffic reports are readable by anon clients" on public.traffic_reports;
+create policy "Traffic reports are readable by anon clients"
+on public.traffic_reports for select to anon using (true);
+
+drop policy if exists "Traffic reports can be inserted by anon clients" on public.traffic_reports;
+create policy "Traffic reports can be inserted by anon clients"
+on public.traffic_reports for insert to anon with check (true);
+
+create table if not exists public.traffic_listener_reports (
+  id uuid primary key default gen_random_uuid(),
+  road_name text not null,
+  road_crossing text,
+  location text,
+  heading text,
+  incident_type text not null,
+  description text not null,
+  listener_name text,
+  verified boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists traffic_listener_reports_expires_idx
+  on public.traffic_listener_reports (expires_at desc);
+
+drop trigger if exists traffic_listener_reports_set_updated_at on public.traffic_listener_reports;
+create trigger traffic_listener_reports_set_updated_at before update on public.traffic_listener_reports
+for each row execute function public.set_updated_at();
+
+alter table public.traffic_listener_reports enable row level security;
+
+drop policy if exists "Traffic listener reports are readable by anon clients" on public.traffic_listener_reports;
+create policy "Traffic listener reports are readable by anon clients"
+on public.traffic_listener_reports for select to anon using (true);
+
+drop policy if exists "Traffic listener reports can be inserted by anon clients" on public.traffic_listener_reports;
+create policy "Traffic listener reports can be inserted by anon clients"
+on public.traffic_listener_reports for insert to anon with check (true);
+
+drop policy if exists "Traffic listener reports can be updated by anon clients" on public.traffic_listener_reports;
+create policy "Traffic listener reports can be updated by anon clients"
+on public.traffic_listener_reports for update to anon using (true) with check (true);

@@ -2,6 +2,8 @@
 
 The Spike is a private live-session control board for fast backstage communication. It combines targeted attention flashing, short live chat, people presence, and a compact scoreboard.
 
+The `/traffic` workspace adds live TrafficSA incidents, listener reports, GPT-written on-air bulletins, an editable closer, Natasha's top-of-hour headline, and a published report preview.
+
 ## What It Does
 
 - Passcode gate before the room opens.
@@ -27,9 +29,18 @@ NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 CUE_ROOM_PASSCODE=
 NEXT_PUBLIC_CUE_ROOM_NAME=hotdrive
+SUPABASE_SERVICE_ROLE_KEY=
+TRAFFICSA_USERNAME=
+TRAFFICSA_PASSWORD=
+TRAFFICSA_URL=https://hotfm.v1.api.trafficsa.co.za/api/latest
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5.4-mini
+CRON_SECRET=
 ```
 
 If `NEXT_PUBLIC_CUE_ROOM_NAME` is missing, the app falls back to `hotdrive`.
+
+Keep `TRAFFICSA_PASSWORD`, `OPENAI_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `CRON_SECRET` server-side. Never prefix them with `NEXT_PUBLIC_`.
 
 ## Supabase Setup
 
@@ -37,6 +48,12 @@ If `NEXT_PUBLIC_CUE_ROOM_NAME` is missing, the app falls back to `hotdrive`.
 2. Open the Supabase SQL editor.
 3. Run `supabase/schema.sql`.
 4. Copy the project URL and anon/publishable key into Vercel.
+
+Re-run the latest `supabase/schema.sql` after this traffic update. It adds `traffic_reports` and `traffic_listener_reports` without deleting the existing tables.
+
+## Traffic Schedule
+
+Vercel generates reports every 10 minutes from 15:00 to 17:50 SAST on weekdays, plus a final 18:00 report. The schedules in `vercel.json` are expressed in UTC.
 
 The table policies allow anon clients to use the room because this is a private utility protected by the app passcode.
 

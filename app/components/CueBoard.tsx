@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient, getRoomName } from "@/app/lib/supabase";
 import type { AttentionRequest, ChatMessage, Contestant, Person, TargetName } from "@/app/types/cues";
@@ -776,6 +777,11 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
             </div>
           </div>
         </header>
+
+        <nav className="flex flex-wrap gap-2 rounded-lg border border-line bg-panel p-2" aria-label="The Spike sections">
+          <Link className="rounded-md bg-signal px-4 py-2 text-sm font-black text-black" href="/">Dashboard</Link>
+          <Link className="rounded-md border border-line bg-ink px-4 py-2 text-sm font-black text-slate-300 hover:border-signal hover:text-signal" href="/traffic">Traffic Desk</Link>
+        </nav>
 
         <section className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,18rem)]">
           <div className="order-2 min-w-0 rounded-lg border border-line bg-panel p-3 lg:order-1">
