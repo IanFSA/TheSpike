@@ -2,7 +2,7 @@
 
 The Spike is a private live-session control board for fast backstage communication. It combines targeted attention flashing, short live chat, people presence, and a compact scoreboard.
 
-The `/traffic` workspace adds live TrafficSA incidents, listener reports, GPT-written on-air bulletins, an editable closer, Natasha's top-of-hour headline, and a published report preview.
+The `/traffic` workspace is a consolidated live-radio workflow with persisted TrafficSA snapshots, deterministic change detection, versioned working drafts, Natasha's matching headline, explicit publishing, and read-on-air acknowledgements.
 
 ## What It Does
 
@@ -49,11 +49,11 @@ Keep `TRAFFICSA_PASSWORD`, `OPENAI_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `C
 3. Run `supabase/schema.sql`.
 4. Copy the project URL and anon/publishable key into Vercel.
 
-Re-run the latest `supabase/schema.sql` after this traffic update. It adds `traffic_reports` and `traffic_listener_reports` without deleting the existing tables.
+Apply `supabase/migrations/202607120800_traffic_workflow.sql` after the base schema. The migration is additive, preserves existing reports, removes anonymous write access to traffic reports, and changes generated reports to draft-by-default.
 
 ## Traffic Schedule
 
-Vercel generates reports every 10 minutes from 15:00 to 17:50 SAST on weekdays, plus a final 18:00 report. The schedules in `vercel.json` are expressed in UTC.
+Traffic scheduling is managed only by the existing cron-job.org configuration. It calls `GET /api/cron/traffic` with `Authorization: Bearer $CRON_SECRET`. The endpoint checks TrafficSA and creates a draft only for meaningful changes (or the first current-day cycle); it never publishes automatically. Do not add Vercel Cron schedules, which would duplicate production runs.
 
 The table policies allow anon clients to use the room because this is a private utility protected by the app passcode.
 

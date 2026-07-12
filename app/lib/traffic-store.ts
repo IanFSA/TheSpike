@@ -1,63 +1,26 @@
-import { createClient } from "@supabase/supabase-js";
-import { priorityFor } from "@/app/lib/traffic-source";
-import type { ListenerInput, TrafficIncident, TrafficReport } from "@/app/types/traffic";
+import{createClient}from"@supabase/supabase-js";import{createHash}from"node:crypto";
+import{incidentFingerprint,priorityFor}from"@/app/lib/traffic-source";
+import type{ListenerInput,TrafficIncident,TrafficReport,TrafficSnapshot}from"@/app/types/traffic";
 
-function client() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return createClient(url, key, { auth: { persistSession: false } });
-}
+export function trafficDb(){const url=process.env.NEXT_PUBLIC_SUPABASE_URL,key=process.env.SUPABASE_SERVICE_ROLE_KEY;if(!url||!key)throw new Error("Supabase service role is not configured");return createClient(url,key,{auth:{persistSession:false}})}
+const reportSelect="*,traffic_read_acknowledgements(read_at,read_by,undone_at)";
+const fail=(error:{message?:string}|null,context:string)=>{if(error)throw new Error(`${context}: ${error.message||"database error"}`)};
+function toReport(row:any):TrafficReport{const ack=(row.traffic_read_acknowledgements||[]).filter((item:any)=>!item.undone_at).sort((a:any,b:any)=>b.read_at.localeCompare(a.read_at))[0];return{id:row.id,version:Number(row.version),headline:row.headline,bulletin:row.bulletin,natashaHeadline:row.natasha_headline,closer:row.closer||"",incidentIds:row.incident_ids||[],createdAt:row.created_at,sourceCheckedAt:row.source_checked_at,generatedBy:row.generated_by,generationKind:row.generation_kind,status:row.status,manuallyEdited:row.manually_edited,publishedAt:row.published_at,publishedBy:row.published_by,model:row.model,inputTokens:row.input_tokens||0,outputTokens:row.output_tokens||0,totalTokens:row.total_tokens||0,generationMs:row.generation_ms||0,errorMessage:row.error_message,readAt:ack?.read_at||null,readBy:ack?.read_by||null}}
+function toListener(row:any):TrafficIncident{const base={roadName:row.road_name,heading:row.heading||"",location:row.location||"",roadCrossing:row.road_crossing||"",incidentType:row.incident_type},priority=priorityFor(row.incident_type,row.description);return{id:`listener-${row.id}`,fingerprint:incidentFingerprint(base),source:"listener",sourceName:"Listener",...base,description:row.description,region:"GAUTENG",sourceCreatedAt:row.created_at,sourceModifiedAt:row.updated_at,receivedAt:row.created_at,lastSeenAt:row.updated_at,listenerName:row.listener_name,verified:Boolean(row.verified),expiresAt:row.expires_at,priority,severity:priority>=85?"critical":priority>=65?"major":"routine",status:"active"}}
 
-type ReportRow = {
-  id: string; headline: string; bulletin: string; natasha_headline: string; closer: string;
-  incident_ids: string[]; created_at: string; source_checked_at: string; generated_by: "openai" | "fallback"; published: boolean;
-};
-
-function toReport(row: ReportRow): TrafficReport {
-  return { id: row.id, headline: row.headline, bulletin: row.bulletin, natashaHeadline: row.natasha_headline, closer: row.closer, incidentIds: row.incident_ids || [], createdAt: row.created_at, sourceCheckedAt: row.source_checked_at, generatedBy: row.generated_by };
-}
-
-export async function getLatestReport() {
-  const supabase = client();
-  if (!supabase) return null;
-  const { data } = await supabase.from("traffic_reports").select("*").eq("published", true).order("created_at", { ascending: false }).limit(1).maybeSingle();
-  return data ? toReport(data as ReportRow) : null;
-}
-
-export async function saveLatestReport(report: TrafficReport) {
-  const supabase = client();
-  if (!supabase) throw new Error("Supabase is not configured");
-  const { error } = await supabase.from("traffic_reports").insert({
-    id: report.id, headline: report.headline, bulletin: report.bulletin, natasha_headline: report.natashaHeadline,
-    closer: report.closer, incident_ids: report.incidentIds, source_checked_at: report.sourceCheckedAt,
-    generated_by: report.generatedBy, published: true, created_at: report.createdAt
-  });
-  if (error) throw error;
-}
-
-export async function getListeners(): Promise<TrafficIncident[]> {
-  const supabase = client();
-  if (!supabase) return [];
-  const { data } = await supabase.from("traffic_listener_reports").select("*").gt("expires_at", new Date().toISOString()).order("created_at", { ascending: false });
-  return (data || []).map((row) => ({
-    id: `listener-${row.id}`, source: "listener" as const, incidentType: row.incident_type, description: row.description,
-    roadName: row.road_name, roadCrossing: row.road_crossing || "", location: row.location || "", region: "GAUTENG",
-    heading: row.heading || "", createdAt: row.created_at, modifiedAt: row.updated_at || row.created_at,
-    listenerName: row.listener_name || "", verified: Boolean(row.verified), expiresAt: row.expires_at,
-    priority: priorityFor(row.incident_type, row.description) + 2
-  }));
-}
-
-export async function addListener(input: ListenerInput) {
-  const supabase = client();
-  if (!supabase) throw new Error("Supabase is not configured");
-  const expiresAt = new Date(Date.now() + Math.min(Math.max(input.minutesActive || 60, 10), 180) * 60_000).toISOString();
-  const { data, error } = await supabase.from("traffic_listener_reports").insert({
-    road_name: input.roadName, road_crossing: input.roadCrossing, location: input.location, heading: input.heading,
-    incident_type: input.incidentType, description: input.description, listener_name: input.listenerName,
-    verified: input.verified, expires_at: expiresAt
-  }).select("*").single();
-  if (error) throw error;
-  return (await getListeners()).find((item) => item.id === `listener-${data.id}`)!;
-}
+export async function getLatestReport(published=false){const query=trafficDb().from("traffic_reports").select(reportSelect).eq(published?"active_published":"status",published?true:"draft").neq("generation_kind","test").order("created_at",{ascending:false}).limit(1).maybeSingle(),{data,error}=await query;fail(error,"Load latest report");return data?toReport(data):null}
+export async function getListeners(){const{data,error}=await trafficDb().from("traffic_listener_reports").select("*").gt("expires_at",new Date().toISOString()).order("created_at",{ascending:false});fail(error,"Load listener reports");return(data||[]).map(toListener)}
+export async function getLatestTrafficSnapshot(){const{data,error}=await trafficDb().from("traffic_snapshots").select("*").order("checked_at",{ascending:false}).limit(1).maybeSingle();fail(error,"Load TrafficSA snapshot");return data?{id:data.id,checkedAt:data.checked_at,incidentCount:data.incident_count,meaningfulChanges:data.meaningful_changes,incidents:data.incidents as TrafficIncident[]}:null}
+export async function getWorkspace(){const db=trafficDb();const[drafts,published,test,snapshot,state,ack,listeners]=await Promise.all([db.from("traffic_reports").select(reportSelect).eq("status","draft").neq("generation_kind","test").order("created_at",{ascending:false}).limit(10),getLatestReport(true),db.from("traffic_reports").select(reportSelect).eq("generation_kind","test").order("created_at",{ascending:false}).limit(1).maybeSingle(),db.from("traffic_snapshots").select("*").order("checked_at",{ascending:false}).limit(1).maybeSingle(),db.from("traffic_workflow_state").select("*").eq("id",true).single(),db.from("traffic_read_acknowledgements").select("report_id,read_at").is("undone_at",null).order("read_at",{ascending:false}).limit(1).maybeSingle(),getListeners()]);fail(drafts.error,"Load drafts");fail(test.error,"Load pipeline test");fail(snapshot.error,"Load traffic snapshot");fail(state.error,"Load workflow state");fail(ack.error,"Load read acknowledgement");const reports=(drafts.data||[]).map(toReport),edited=reports.find(report=>report.manuallyEdited),draft=edited||reports[0]||null,updatedDraft=edited?reports.find(report=>!report.manuallyEdited&&report.createdAt>edited.createdAt)||null:null,row=snapshot.data,traffic=row?.incidents||[],incidents=[...listeners,...traffic];return{draft,published,updatedDraft,latestTest:test.data?toReport(test.data):null,snapshot:row?{id:row.id,checkedAt:row.checked_at,incidentCount:incidents.length,meaningfulChanges:row.meaningful_changes,incidents}:null,lastRead:ack.data?{reportId:ack.data.report_id,readAt:ack.data.read_at}:null,pendingGeneration:Boolean(state.data.pending_generation),pendingChangeCount:state.data.pending_change_count||0,pendingSince:state.data.pending_since||null,lastSuccessfulCheckAt:state.data.last_successful_check_at||null,lastCheckError:state.data.last_check_error||null,lastCheckErrorAt:state.data.last_check_error_at||null,lastGenerationError:state.data.last_generation_error||null,lastGenerationErrorAt:state.data.last_generation_error_at||null}}
+export async function saveDraft(report:TrafficReport){const status=report.generationKind==="test"?"test":"draft";const{error}=await trafficDb().from("traffic_reports").insert({id:report.id,version:report.version,headline:report.headline,bulletin:report.bulletin,natasha_headline:report.natashaHeadline,closer:report.closer,incident_ids:report.incidentIds,source_checked_at:report.sourceCheckedAt,generated_by:report.generatedBy,generation_kind:report.generationKind,status,published:false,manually_edited:report.manuallyEdited,model:report.model,input_tokens:report.inputTokens,output_tokens:report.outputTokens,total_tokens:report.totalTokens,generation_ms:report.generationMs,created_at:report.createdAt});fail(error,"Save generated report")}
+export async function updateDraft(id:string,version:number,patch:{bulletin:string;natashaHeadline:string}){const{data,error}=await trafficDb().from("traffic_reports").update({bulletin:patch.bulletin,natasha_headline:patch.natashaHeadline,manually_edited:true}).eq("id",id).eq("version",version).eq("status","draft").neq("generation_kind","test").select("id").maybeSingle();fail(error,"Save manual edits");if(!data)throw new Error("Draft changed while you were editing. Your text has been preserved locally.")}
+export async function adoptDraft(id:string){const db=trafficDb(),{data:target,error:readError}=await db.from("traffic_reports").select("id,created_at,generation_kind,status").eq("id",id).maybeSingle();fail(readError,"Load draft to adopt");if(!target||!['draft','test'].includes(target.status))throw new Error("Draft is no longer available");const{error}=await db.from("traffic_reports").update({status:"draft",generation_kind:"manual"}).eq("id",id).eq("status",target.status);fail(error,"Adopt draft");const supersede=await db.from("traffic_reports").update({status:"superseded"}).eq("status","draft").eq("manually_edited",true).neq("id",id).lt("created_at",target.created_at);fail(supersede.error,"Supersede previous edited draft")}
+export async function publishDraft(id:string,by:string){const{error}=await trafficDb().rpc("publish_traffic_report",{p_report_id:id,p_actor:by});fail(error,"Publish report")}
+export async function saveSnapshot(incidents:TrafficIncident[],changes:number){const db=trafficDb(),checkedAt=new Date().toISOString(),contentHash=createHash("sha256").update(JSON.stringify(incidents.map(item=>[item.fingerprint,item.description,item.sourceModifiedAt,item.lastSeenAt,item.status]))).digest("hex"),{data,error}=await db.from("traffic_snapshots").insert({checked_at:checkedAt,incident_count:incidents.length,meaningful_changes:changes,incidents,content_hash:contentHash}).select("id").single();fail(error,"Save TrafficSA snapshot");if(!data)throw new Error("Save TrafficSA snapshot returned no row");const state=await db.from("traffic_workflow_state").update({last_successful_check_at:checkedAt,last_check_error:null,last_check_error_at:null}).eq("id",true);fail(state.error,"Update successful TrafficSA check");return{id:data.id,checkedAt,incidentCount:incidents.length,meaningfulChanges:changes,incidents} satisfies TrafficSnapshot}
+export async function markPending(snapshotId:string|null,count:number){if(count<=0)return;const db=trafficDb(),{data,error}=await db.from("traffic_workflow_state").select("pending_generation,pending_change_count,pending_since").eq("id",true).single();fail(error,"Load pending generation state");if(!data)throw new Error("Pending generation state is unavailable");const update=await db.from("traffic_workflow_state").update({pending_generation:true,pending_change_count:(data.pending_change_count||0)+count,pending_since:data.pending_since||new Date().toISOString(),pending_snapshot_id:snapshotId}).eq("id",true);fail(update.error,"Record pending generation state")}
+export async function clearPending(){const{error}=await trafficDb().from("traffic_workflow_state").update({pending_generation:false,pending_change_count:0,pending_since:null,pending_snapshot_id:null}).eq("id",true);fail(error,"Clear pending generation state")}
+export async function recordCheckError(message:string){const{error}=await trafficDb().from("traffic_workflow_state").update({last_check_error:message,last_check_error_at:new Date().toISOString()}).eq("id",true);fail(error,"Record TrafficSA error")}
+export async function recordGenerationError(message:string|null){const{error}=await trafficDb().from("traffic_workflow_state").update({last_generation_error:message,last_generation_error_at:message?new Date().toISOString():null}).eq("id",true);fail(error,"Record generation error")}
+export async function acknowledge(id:string,by:string){const{error}=await trafficDb().from("traffic_read_acknowledgements").insert({report_id:id,read_by:by});fail(error,"Mark report read on air")}
+export async function undoAcknowledge(id:string){const db=trafficDb(),{data,error}=await db.from("traffic_read_acknowledgements").select("id,read_at").eq("report_id",id).is("undone_at",null).order("read_at",{ascending:false}).limit(1).maybeSingle();fail(error,"Load acknowledgement");if(!data||Date.now()-new Date(data.read_at).getTime()>10_000)throw new Error("Undo window has expired");const update=await db.from("traffic_read_acknowledgements").update({undone_at:new Date().toISOString()}).eq("id",data.id).is("undone_at",null).select("id").maybeSingle();fail(update.error,"Undo read acknowledgement");if(!update.data)throw new Error("Acknowledgement changed before it could be undone")}
+export async function addListener(input:ListenerInput){const db=trafficDb(),{data,error}=await db.from("traffic_listener_reports").insert({road_name:input.roadName,road_crossing:input.roadCrossing,location:input.location,heading:input.heading,incident_type:input.incidentType,description:input.description,listener_name:input.listenerName,verified:input.verified,expires_at:new Date(Date.now()+Math.min(Math.max(input.minutesActive,10),180)*60_000).toISOString()}).select("*").single();fail(error,"Save listener report");return toListener(data)}

@@ -1,10 +1,2 @@
-import { redirect } from "next/navigation";
-import { isAuthenticated } from "@/app/lib/auth";
-import TrafficBoard from "@/app/traffic/TrafficBoard";
-
-export const dynamic = "force-dynamic";
-
-export default async function TrafficPage() {
-  if (!(await isAuthenticated())) redirect("/");
-  return <TrafficBoard />;
-}
+import{isAuthenticated}from"@/app/lib/auth";import{mockTrafficWorkspace}from"@/app/lib/traffic-mock";import TrafficBoard from"./TrafficBoard";
+export const dynamic="force-dynamic";export default async function TrafficPage(){const previewMode=process.env.THESPIKE_MOCK_PREVIEW==="1"&&process.env.NODE_ENV!=="production";return <TrafficBoard initialAuthenticated={previewMode||await isAuthenticated()} previewMode={previewMode} initialWorkspace={previewMode?mockTrafficWorkspace:null}/>}

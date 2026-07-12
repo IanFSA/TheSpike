@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import SiteHeader from "@/app/components/SiteHeader";
 import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient, getRoomName } from "@/app/lib/supabase";
 import type { AttentionRequest, ChatMessage, Contestant, Person, TargetName } from "@/app/types/cues";
@@ -740,6 +740,8 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
         </button>
       ) : null}
 
+      <SiteHeader active="dashboard" user={currentUser || "Authorised user"} authenticated />
+
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-3 p-2 sm:p-3 lg:p-4">
         {realtimeDegraded ? (
           <section className="rounded-md border border-warn/60 bg-warn/15 px-3 py-2 text-warn">
@@ -748,40 +750,10 @@ export default function CueBoard({ initialAuthenticated }: { initialAuthenticate
           </section>
         ) : null}
 
-        <header className="rounded-lg border border-line bg-panel px-4 py-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="min-w-0">
-              <h1 className="text-3xl font-black leading-none text-signal">The Spike</h1>
-              <p className="mt-1 truncate text-xs uppercase tracking-wide text-slate-400">
-                {currentUser} - {roomName} - {connection}
-              </p>
-            </div>
-            <div className="flex min-w-0 items-center justify-between gap-3 sm:justify-end">
-              <select
-                className="min-w-0 max-w-[12rem] rounded-md border border-line bg-ink px-3 py-2 text-sm font-bold text-white sm:max-w-none"
-                value={currentUser}
-                onChange={(event) => chooseUser(event.target.value)}
-              >
-                {activePeople.map((person) => (
-                  <option key={person.id} value={person.name}>
-                    I am {person.name}
-                  </option>
-                ))}
-              </select>
-              <div className="shrink-0 text-right">
-                <div className="text-2xl font-black tabular-nums">{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
-                <button className="text-xs font-bold uppercase text-slate-400 underline-offset-4 hover:underline" onClick={logout} type="button">
-                  Logout
-                </button>
-              </div>
-            </div>
-          </div>
-        </header>
-
-        <nav className="flex flex-wrap gap-2 rounded-lg border border-line bg-panel p-2" aria-label="The Spike sections">
-          <Link className="rounded-md bg-signal px-4 py-2 text-sm font-black text-black" href="/">Dashboard</Link>
-          <Link className="rounded-md border border-line bg-ink px-4 py-2 text-sm font-black text-slate-300 hover:border-signal hover:text-signal" href="/traffic">Traffic Desk</Link>
-        </nav>
+        <section className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-panel p-2 text-xs font-bold text-slate-400">
+          <span>{roomName} · {connection}</span>
+          <div className="flex items-center gap-2"><select className="rounded-md border border-line bg-ink px-3 py-2 text-sm font-bold text-white" value={currentUser} onChange={(event) => chooseUser(event.target.value)}>{activePeople.map((person) => <option key={person.id} value={person.name}>I am {person.name}</option>)}</select><button className="px-2 font-black uppercase hover:text-signal" onClick={logout} type="button">Logout</button></div>
+        </section>
 
         <section className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,18rem)]">
           <div className="order-2 min-w-0 rounded-lg border border-line bg-panel p-3 lg:order-1">

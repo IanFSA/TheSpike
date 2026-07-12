@@ -1,16 +1,4 @@
-import { NextResponse } from "next/server";
-import { isAuthenticated } from "@/app/lib/auth";
-import { fetchTrafficSA } from "@/app/lib/traffic-source";
-import { getListeners } from "@/app/lib/traffic-store";
-
-export const dynamic = "force-dynamic";
-
-export async function GET() {
-  if (!(await isAuthenticated())) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
-  try {
-    const [api, listeners] = await Promise.all([fetchTrafficSA(), getListeners()]);
-    return NextResponse.json({ incidents: [...listeners, ...api], checkedAt: new Date().toISOString() });
-  } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not fetch traffic" }, { status: 502 });
-  }
-}
+import {NextRequest,NextResponse} from "next/server";import {isAuthenticated} from "@/app/lib/auth";import {acknowledge,adoptDraft,getWorkspace,publishDraft,undoAcknowledge,updateDraft} from "@/app/lib/traffic-store";import {checkTraffic,generateLatest,testFullPipeline} from "@/app/lib/traffic-workflow";
+export const dynamic="force-dynamic";export const maxDuration=60;
+export async function GET(){const authenticated=await isAuthenticated();try{const workspace=await getWorkspace();return NextResponse.json(authenticated?{...workspace,authenticated}:{authenticated:false,published:workspace.published,draft:null,updatedDraft:null,snapshot:null,lastSuccessfulCheckAt:workspace.lastSuccessfulCheckAt,lastCheckError:null,lastGenerationError:null})}catch(e){return NextResponse.json({error:e instanceof Error?e.message:"Could not load traffic"},{status:500})}}
+export async function POST(request:NextRequest){if(!(await isAuthenticated()))return NextResponse.json({error:"Unauthorised"},{status:401});try{const body=await request.json(),actor=String(body.actor||"Authorised user").slice(0,80),options={minutes:Number(body.minutes??60),selectedIds:Array.isArray(body.selectedIds)?body.selectedIds.map(String):undefined,instructions:typeof body.instructions==="string"?body.instructions.slice(0,500):undefined};if(body.action==="check")return NextResponse.json(await checkTraffic());if(body.action==="generate")return NextResponse.json({report:await generateLatest("manual",options)});if(body.action==="test")return NextResponse.json(await testFullPipeline(options));if(body.action==="edit"){await updateDraft(body.id,Number(body.version),{bulletin:body.bulletin,natashaHeadline:body.natashaHeadline});return NextResponse.json({ok:true})}if(body.action==="adopt"){await adoptDraft(body.id);return NextResponse.json({ok:true})}if(body.action==="publish"){await publishDraft(body.id,actor);return NextResponse.json({ok:true})}if(body.action==="read"){await acknowledge(body.id,actor);return NextResponse.json({ok:true})}if(body.action==="undo-read"){await undoAcknowledge(body.id);return NextResponse.json({ok:true})}return NextResponse.json({error:"Unknown action"},{status:400})}catch(e){const message=e instanceof Error?e.message:"Traffic action failed";return NextResponse.json({error:message},{status:/changed while|no longer available/i.test(message)?409:500})}}
