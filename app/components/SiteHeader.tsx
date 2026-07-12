@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 
 type SiteHeaderProps = {
@@ -62,8 +63,19 @@ export default function SiteHeader({
   return (
     <header className="sticky top-0 z-50 border-b border-line bg-panel/95 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-7xl items-center gap-2 px-2 sm:h-16 sm:gap-4 sm:px-5">
-        <Link href="/" className="shrink-0 text-lg font-black text-signal sm:text-2xl">
-          The Spike
+        <Link
+          href="/"
+          className="flex shrink-0 items-center gap-2 text-lg font-black text-signal sm:text-2xl"
+        >
+          <Image
+            src="/brand/the-spike-header-mark.png"
+            alt=""
+            width={32}
+            height={32}
+            priority
+            className="h-7 w-7 shrink-0 object-contain sm:h-8 sm:w-8"
+          />
+          <span>The Spike</span>
         </Link>
 
         <nav className="flex min-w-0 flex-1 items-stretch self-stretch">
